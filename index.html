@@ -1,134 +1,253 @@
-<script>
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>钓鱼浮漂移动检测</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #f0f0f0;
+      font-family: Arial, sans-serif;
+      text-align: center;
+    }
+    h1 {
+      margin-top: 20px;
+      font-size: 24px;
+    }
+    video {
+      width: 90%;
+      max-width: 600px;
+      margin: 10px auto;
+      display: block;
+      background: #333;
+    }
+    #canvas {
+      display: none;
+    }
+    #detectionArea {
+      position: absolute;
+      border: 2px solid yellow;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #message {
+      color: red;
+      font-size: 1.2em;
+      font-weight: bold;
+      margin: 20px 0;
+      display: none;
+    }
+    #startBtn {
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      background: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 5px;
+    }
+    .video-container {
+      position: relative;
+      width: 90%;
+      max-width: 600px;
+      margin: 10px auto;
+    }
+    #debugInfo {
+      margin: 10px;
+      text-align: left;
+      font-size: 12px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <h1>钓鱼浮漂检测器</h1>
+  <p>请将红色浮漂对准画面中央黄框区域</p>
+
+  <div class="video-container">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="detectionArea"></div>
+  </div>
+  
+  <canvas id="canvas"></canvas>
+  <div id="message">检测到浮漂动作！</div>
+  <button id="startBtn">开始检测</button>
+  <div id="debugInfo"></div>
+
+  <audio id="alarmAudio" src="alarm.mp3" preload="auto"></audio>
+
+  <script>
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const message = document.getElementById('message');
     const startBtn = document.getElementById('startBtn');
     const alarmAudio = document.getElementById('alarmAudio');
+    const detectionArea = document.getElementById('detectionArea');
+    const debugInfo = document.getElementById('debugInfo');
 
+    // 检测参数配置
+    const config = {
+      oscillationThreshold: 5,    // 抖动幅度阈值（像素）
+      oscillationCount: 3,        // 触发报警需要的最小抖动次数
+      detectionInterval: 50,      // 检测间隔（毫秒）
+      redThreshold: 150,          // 红色分量阈值
+      greenBlueThreshold: 80,     // 绿蓝分量阈值
+      minRedPixels: 20,          // 最小红色像素数量
+    };
+
+    // 状态变量
+    let lastPositions = [];       // 记录最近的位置
+    let oscillationCounter = 0;   // 抖动计数器
+    let lastAlarmTime = 0;       // 上次报警时间
+    
     startBtn.addEventListener('click', initCameraAndDetection);
 
     function initCameraAndDetection() {
-        startBtn.style.display = 'none';
+      startBtn.style.display = 'none';
+      
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
 
-        const constraints = {
-            audio: false,
-            video: {
-                facingMode: 'environment'
-            }
-        };
-
-        navigator.mediaDevices.getUserMedia(constraints)
-            .then(stream => {
-                video.srcObject = stream;
-                video.onloadedmetadata = () => {
-                    video.play();
-                    startDetectionLoop();
-                };
-            })
-            .catch(err => {
-                console.error('无法访问摄像头：', err);
-                alert('无法访问摄像头，请检查权限或使用支持的设备与浏览器。');
-            });
+      navigator.mediaDevices.getUserMedia(constraints)
+        .then(stream => {
+          video.srcObject = stream;
+          video.onloadedmetadata = () => {
+            video.play();
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            updateDetectionArea();
+            startDetectionLoop();
+          };
+        })
+        .catch(err => {
+          console.error('摄像头访问失败：', err);
+          alert('无法访问摄像头，请检查权限设置。');
+        });
     }
 
-    let previousYPositions = [];
-    const maxHistory = 10; // 保存最近 10 帧的 Y 坐标数据
-    const shakeThreshold = 5; // 定义 Y 坐标抖动的变化幅度阈值
+    function updateDetectionArea() {
+      const videoRect = video.getBoundingClientRect();
+      const areaWidth = videoRect.width / 3;  // 1/3 宽度
+      const areaHeight = videoRect.height / 5; // 1/5 高度
+      
+      detectionArea.style.width = areaWidth + 'px';
+      detectionArea.style.height = areaHeight + 'px';
+      detectionArea.style.left = (videoRect.left + (videoRect.width - areaWidth) / 2) + 'px';
+      detectionArea.style.top = (videoRect.top + (videoRect.height - areaHeight) / 2) + 'px';
+    }
 
     function startDetectionLoop() {
-        setInterval(() => {
-            detectRedObjectMovement();
-        }, 100);
+      setInterval(() => {
+        detectFloatMovement();
+      }, config.detectionInterval);
     }
 
-    function detectRedObjectMovement() {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const result = detectRedObjectCenter(frameData.data, canvas.width, canvas.height);
+    function detectFloatMovement() {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      // 计算检测区域
+      const regionWidth = Math.floor(canvas.width / 3);
+      const regionHeight = Math.floor(canvas.height / 5);
+      const xStart = Math.floor((canvas.width - regionWidth) / 2);
+      const yStart = Math.floor((canvas.height - regionHeight) / 2);
 
-        if (result.count > 0) {
-            if (previousYPositions.length >= maxHistory) {
-                previousYPositions.shift(); // 移除最早的数据点
-            }
-            previousYPositions.push(result.y);
+      const frameData = ctx.getImageData(xStart, yStart, regionWidth, regionHeight);
+      const result = detectRedObject(frameData.data, regionWidth, regionHeight);
 
-            if (isShaking(previousYPositions)) {
+      if (result.count >= config.minRedPixels) {
+        const currentPosition = result.y;
+        lastPositions.push(currentPosition);
+        
+        // 只保留最近的位置记录
+        if (lastPositions.length > 5) {
+          lastPositions.shift();
+        }
+
+        // 检测抖动
+        if (lastPositions.length >= 2) {
+          const movement = Math.abs(lastPositions[lastPositions.length - 1] - lastPositions[lastPositions.length - 2]);
+          
+          if (movement >= config.oscillationThreshold) {
+            oscillationCounter++;
+            
+            // 达到抖动次数阈值触发报警
+            if (oscillationCounter >= config.oscillationCount) {
+              const now = Date.now();
+              if (now - lastAlarmTime > 3000) { // 至少间隔3秒才会再次报警
                 showAlarm();
+                lastAlarmTime = now;
+              }
+              oscillationCounter = 0;
             }
+          } else {
+            // 逐渐减少抖动计数
+            oscillationCounter = Math.max(0, oscillationCounter - 0.5);
+          }
         }
+
+        // 更新调试信息
+        debugInfo.textContent = `检测到红色像素: ${result.count} 
+                               当前位置: ${Math.round(result.y)}
+                               抖动计数: ${oscillationCounter}`;
+      } else {
+        lastPositions = [];
+        oscillationCounter = 0;
+        debugInfo.textContent = '未检测到浮漂';
+      }
     }
 
-    function detectRedObjectCenter(data, width, height) {
-        const regionWidth = Math.floor(width / 3);
-        const regionHeight = Math.floor(height / 5);
-        const xStart = Math.floor((width - regionWidth) / 2);
-        const yStart = Math.floor((height - regionHeight) / 2);
-        const xEnd = xStart + regionWidth;
-        const yEnd = yStart + regionHeight;
+    function detectRedObject(data, width, height) {
+      let redCount = 0;
+      let sumY = 0;
 
-        let redCount = 0;
-        let sumX = 0;
-        let sumY = 0;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = (y * width + x) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
 
-        for (let y = yStart; y < yEnd; y++) {
-            for (let x = xStart; x < xEnd; x++) {
-                const idx = (y * width + x) * 4;
-                const r = data[idx];
-                const g = data[idx + 1];
-                const b = data[idx + 2];
-
-                if (r > 150 && g < 80 && b < 80) {
-                    redCount++;
-                    sumX += x;
-                    sumY += y;
-                }
-            }
+          if (r > config.redThreshold && g < config.greenBlueThreshold && b < config.greenBlueThreshold) {
+            redCount++;
+            sumY += y;
+          }
         }
+      }
 
-        if (redCount > 0) {
-            return {
-                count: redCount,
-                x: sumX / redCount,
-                y: sumY / redCount
-            };
-        } else {
-            return {
-                count: 0,
-                x: 0,
-                y: 0
-            };
-        }
-    }
-
-    function isShaking(yPositions) {
-        if (yPositions.length < 2) return false;
-
-        // 计算 Y 坐标的变化量
-        const diffs = [];
-        for (let i = 1; i < yPositions.length; i++) {
-            diffs.push(Math.abs(yPositions[i] - yPositions[i - 1]));
-        }
-
-        // 计算变化量的平均值和判断是否抖动
-        const avgDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
-        return avgDiff > shakeThreshold;
+      return {
+        count: redCount,
+        y: redCount > 0 ? sumY / redCount : 0
+      };
     }
 
     function showAlarm() {
-        message.style.display = 'block';
-        try {
-            alarmAudio.currentTime = 0;
-            alarmAudio.play().catch(err => {
-                console.warn('音频播放被阻止或发生错误：', err);
-            });
-        } catch (e) {
-            console.warn('播放报警音异常：', e);
-        }
+      message.style.display = 'block';
+      message.textContent = '检测到浮漂抖动！';
+      
+      try {
+        alarmAudio.currentTime = 0;
+        alarmAudio.play().catch(err => {
+          console.warn('音频播放失败：', err);
+        });
+      } catch (e) {
+        console.warn('报警异常：', e);
+      }
 
-        setTimeout(() => {
-            message.style.display = 'none';
-        }, 3000);
+      setTimeout(() => {
+        message.style.display = 'none';
+      }, 2000);
     }
-</script>
 
+    // 窗口大小改变时更新检测区域
+    window.addEventListener('resize', updateDetectionArea);
+  </script>
+</body>
+</html>
