@@ -1,63 +1,4 @@
-<!DOCTYPE html>
-<html lang="zh">
-<head>
-  <meta charset="UTF-8">
-  <title>红色物体移动检测示例（带声音报警）</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      background: #f0f0f0;
-      font-family: Arial, sans-serif;
-      text-align: center;
-    }
-    h1 {
-      margin-top: 20px;
-    }
-    video {
-      width: 90%;
-      max-width: 600px;
-      margin: 10px auto;
-      display: block;
-      background: #333;
-    }
-    #canvas {
-      display: none; /* 隐藏Canvas，仅用于图像分析 */
-    }
-    #message {
-      color: red;
-      font-size: 1.2em;
-      font-weight: bold;
-      margin: 20px 0;
-      display: none;
-    }
-    #startBtn {
-      padding: 10px 20px;
-      font-size: 16px;
-      cursor: pointer;
-    }
-  </style>
-</head>
-<body>
-  <h1>红色物体移动检测（带声音报警）</h1>
-  <p>请确保在 HTTPS 环境下打开本页面，并允许使用摄像头。</p>
-
-  <!-- 视频预览 -->
-  <video id="video" autoplay playsinline muted></video>
-  
-  <!-- 用于处理图像的 Canvas -->
-  <canvas id="canvas" width="640" height="480"></canvas>
-
-  <!-- 提示信息 -->
-  <div id="message">红色物体移动了！</div>
-
-  <!-- 开始检测按钮（需要用户交互，以便允许播放音频） -->
-  <button id="startBtn">开始检测</button>
-
-  <!-- 声音文件 alarm.mp3，需与你的index.html处于同一目录 -->
-  <audio id="alarmAudio" src="alarm.mp3" preload="auto"></audio>
-
-  <script>
+<script>
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
@@ -65,144 +6,129 @@
     const startBtn = document.getElementById('startBtn');
     const alarmAudio = document.getElementById('alarmAudio');
 
-    // 用户点击按钮后才能开始摄像头 & 图像检测 & 声音播放
     startBtn.addEventListener('click', initCameraAndDetection);
 
     function initCameraAndDetection() {
-      // 隐藏按钮
-      startBtn.style.display = 'none';
+        startBtn.style.display = 'none';
 
-      // 请求摄像头权限
-      const constraints = {
-        audio: false,
-        video: {
-          facingMode: 'environment' // 使用后置摄像头，可改为 'user' （前置）
-        }
-      };
+        const constraints = {
+            audio: false,
+            video: {
+                facingMode: 'environment'
+            }
+        };
 
-      navigator.mediaDevices.getUserMedia(constraints)
-        .then(stream => {
-          video.srcObject = stream;
-          // 等待视频流开始播放后再进行检测
-          video.onloadedmetadata = () => {
-            video.play();
-            startDetectionLoop();
-          };
-        })
-        .catch(err => {
-          console.error('无法访问摄像头：', err);
-          alert('无法访问摄像头，请检查权限或使用支持的设备与浏览器。');
-        });
+        navigator.mediaDevices.getUserMedia(constraints)
+            .then(stream => {
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    startDetectionLoop();
+                };
+            })
+            .catch(err => {
+                console.error('无法访问摄像头：', err);
+                alert('无法访问摄像头，请检查权限或使用支持的设备与浏览器。');
+            });
     }
 
-    let lastCenter = null;
+    let previousYPositions = [];
+    const maxHistory = 10; // 保存最近 10 帧的 Y 坐标数据
+    const shakeThreshold = 5; // 定义 Y 坐标抖动的变化幅度阈值
 
     function startDetectionLoop() {
-      // 每 100ms 检测一次，可自行调整
-      setInterval(() => {
-        detectRedObjectMovement();
-      }, 100);
+        setInterval(() => {
+            detectRedObjectMovement();
+        }, 100);
     }
 
     function detectRedObjectMovement() {
-      // 将视频帧绘制到Canvas
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const result = detectRedObjectCenter(frameData.data, canvas.width, canvas.height);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const result = detectRedObjectCenter(frameData.data, canvas.width, canvas.height);
 
-      if (result.count > 0) {
-        // 如果检测到红色物体
-        if (lastCenter) {
-          // 计算移动距离
-          const dx = result.x - lastCenter.x;
-          const dy = result.y - lastCenter.y;
-          const distance = Math.sqrt(dx * dx + dy * dy);
+        if (result.count > 0) {
+            if (previousYPositions.length >= maxHistory) {
+                previousYPositions.shift(); // 移除最早的数据点
+            }
+            previousYPositions.push(result.y);
 
-          // 如果移动距离超过阈值，则触发报警
-          if (distance > 10) {
-            showAlarm();
-          }
+            if (isShaking(previousYPositions)) {
+                showAlarm();
+            }
         }
-        // 更新上一次中心坐标
-        lastCenter = { x: result.x, y: result.y };
-      } else {
-        // 没有检测到红色物体
-        // console.log('No red object detected in the center region');
-      }
     }
 
-    /**
-     * 在画面中心区域检测红色物体
-     * @param {Uint8ClampedArray} data - 像素数据
-     * @param {number} width
-     * @param {number} height
-     * @returns {Object} { count, x, y }
-     */
     function detectRedObjectCenter(data, width, height) {
-      // 定义中心区域大小
-      const regionSize = 100; 
-      const xStart = Math.floor((width - regionSize) / 2);
-      const yStart = Math.floor((height - regionSize) / 2);
-      const xEnd = xStart + regionSize;
-      const yEnd = yStart + regionSize;
+        const regionWidth = Math.floor(width / 3);
+        const regionHeight = Math.floor(height / 5);
+        const xStart = Math.floor((width - regionWidth) / 2);
+        const yStart = Math.floor((height - regionHeight) / 2);
+        const xEnd = xStart + regionWidth;
+        const yEnd = yStart + regionHeight;
 
-      let redCount = 0;
-      let sumX = 0;
-      let sumY = 0;
+        let redCount = 0;
+        let sumX = 0;
+        let sumY = 0;
 
-      for (let y = yStart; y < yEnd; y++) {
-        for (let x = xStart; x < xEnd; x++) {
-          const idx = (y * width + x) * 4; // RGBA
-          const r = data[idx];
-          const g = data[idx + 1];
-          const b = data[idx + 2];
+        for (let y = yStart; y < yEnd; y++) {
+            for (let x = xStart; x < xEnd; x++) {
+                const idx = (y * width + x) * 4;
+                const r = data[idx];
+                const g = data[idx + 1];
+                const b = data[idx + 2];
 
-          // 简单的红色阈值判断：R > 150, G < 80, B < 80
-          if (r > 150 && g < 80 && b < 80) {
-            redCount++;
-            sumX += x;
-            sumY += y;
-          }
+                if (r > 150 && g < 80 && b < 80) {
+                    redCount++;
+                    sumX += x;
+                    sumY += y;
+                }
+            }
         }
-      }
 
-      if (redCount > 0) {
-        return {
-          count: redCount,
-          x: sumX / redCount,
-          y: sumY / redCount
-        };
-      } else {
-        return {
-          count: 0,
-          x: 0,
-          y: 0
-        };
-      }
+        if (redCount > 0) {
+            return {
+                count: redCount,
+                x: sumX / redCount,
+                y: sumY / redCount
+            };
+        } else {
+            return {
+                count: 0,
+                x: 0,
+                y: 0
+            };
+        }
+    }
+
+    function isShaking(yPositions) {
+        if (yPositions.length < 2) return false;
+
+        // 计算 Y 坐标的变化量
+        const diffs = [];
+        for (let i = 1; i < yPositions.length; i++) {
+            diffs.push(Math.abs(yPositions[i] - yPositions[i - 1]));
+        }
+
+        // 计算变化量的平均值和判断是否抖动
+        const avgDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+        return avgDiff > shakeThreshold;
     }
 
     function showAlarm() {
-      // 显示提示文字
-      message.style.display = 'block';
-      // 播放声音
-      try {
-        alarmAudio.currentTime = 0; // 每次重头开始播放
-        alarmAudio.play().catch(err => {
-          console.warn('音频播放被阻止或发生错误：', err);
-        });
-      } catch (e) {
-        console.warn('播放报警音异常：', e);
-      }
+        message.style.display = 'block';
+        try {
+            alarmAudio.currentTime = 0;
+            alarmAudio.play().catch(err => {
+                console.warn('音频播放被阻止或发生错误：', err);
+            });
+        } catch (e) {
+            console.warn('播放报警音异常：', e);
+        }
 
-      // 也可以弹窗
-      alert('红色物体检测到移动！');
-
-      // 一段时间后隐藏提示（可自行调整）
-      setTimeout(() => {
-        message.style.display = 'none';
-      }, 3000);
+        setTimeout(() => {
+            message.style.display = 'none';
+        }, 3000);
     }
-  </script>
-</body>
-</html>
+</script>
 
